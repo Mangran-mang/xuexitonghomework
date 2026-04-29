@@ -62,14 +62,14 @@ def visit_target_page(browser,zhanghao1,mima1,course_name_list):
             EC.presence_of_element_located((By.XPATH, '//*[@id="loginBtn"]'))
         ).click()
 
-        time.sleep(1.5)
+        time.sleep(1)
         # 此时已进入个人空间
         # 先获取所有课程名
         course_iframe = WebDriverWait(browser,8).until(
             EC.presence_of_element_located((By.XPATH,'//*[@id="frame_content"]'))
         )
         browser.switch_to.frame(course_iframe)
-        time.sleep(2)
+        time.sleep(1)
         remaining_courses = course_name_list.copy()
         while remaining_courses:
             myStudy_course_list = browser.find_elements(By.XPATH, '//*[@id="stuNormalCourseListDiv"]/div')  # 直接获取所有具体课程
@@ -88,9 +88,12 @@ def visit_target_page(browser,zhanghao1,mima1,course_name_list):
                             time.sleep(1)
                             print("切换到任务界面等待结束1")
                             browser.back()
-                            if browser.title != "个人空间":
-                                browser.back()
-                            time.sleep(1)
+                            while True:
+                                if browser.title != "个人空间":
+                                    browser.back()
+                                    time.sleep(0.5)
+                                else:
+                                    break
                             if remaining_courses:
                                 print("还有待刷课程{}".format(remaining_courses))
                             browser.switch_to.frame(course_iframe)
@@ -116,11 +119,6 @@ def goto_home_work(driver,course_name):# 学习通具体作业解密没有嵌套
         homework_list = WebDriverWait(driver, 3).until(
             EC.presence_of_all_elements_located((By.XPATH, '/html/body/div[2]/div/div/div[2]/div[2]/ul/li'))
         )
-        # print("执行到这里2")
-        # if homework_list:
-        #     print("成功获取作业列表")
-        # else:
-        #     print("获取作业列表失败")
         processed = False
         # 拿到全作业列表后，遍历拿到它们的名字和完成状况，并排除实验作业
         for homework in homework_list:
