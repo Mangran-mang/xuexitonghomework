@@ -14,7 +14,4 @@
 3. **匹配答案**：将题目发送至 DeepSeek API，获取答案建议
 4. **提交结果**：根据 API 返回的答案，自动选择并提交作业
 
-## 使用说明
-1. 安装依赖：
-   ```bash
-   pip install -r requirements.txt
+4/29 修复了作业刷完后不返回主页的bug
