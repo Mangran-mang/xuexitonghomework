@@ -16,6 +16,22 @@ import ai_deepseek
 question_bank = []
 api = ''
 
+# 增加输出场景
+class PrintToFile:
+    def __init__(self, file_name):
+        self.terminal = sys.stdout
+        self.log = open(file_name, "w", encoding="utf-8")
+
+    def write(self, message):
+        if self.terminal is not None:
+            self.terminal.write(message)
+        if self.log is not None:
+            self.log.write(message)
+
+    def flush(self):
+        pass
+
+sys.stdout = PrintToFile("输出日志.txt")
 
 def get_resource_path(relative_path):
     # 直接读取exe所在的当前目录，不管是开发环境还是打包环境
@@ -65,17 +81,32 @@ def visit_target_page(browser,zhanghao1,mima1,course_name_list):
         time.sleep(1)
         # 此时已进入个人空间
         # 先获取所有课程名
+        print("已进入个人主页")
         course_iframe = WebDriverWait(browser,8).until(
             EC.presence_of_element_located((By.XPATH,'//*[@id="frame_content"]'))
         )
         browser.switch_to.frame(course_iframe)
         time.sleep(1)
         remaining_courses = course_name_list.copy()
+        # ==============检测是不是旧版学习通==========
+        try:
+            new_or_old_button = WebDriverWait(browser, 6).until(
+                EC.presence_of_element_located((By.XPATH, '//*[@id="divbox"]/div/div/div[1]/a'))
+            )
+            if "体验新版" in new_or_old_button.text:
+                new_or_old_button.click()
+                print("已成功选择新版")
+                time.sleep(1.5)
+        except Exception as e:
+            pass
+        #======================================
         while remaining_courses:
             myStudy_course_list = browser.find_elements(By.XPATH, '//*[@id="stuNormalCourseListDiv"]/div')  # 直接获取所有具体课程
+
             for course in myStudy_course_list:
                 try:
                     name = course.find_element(By.XPATH, './div[2]/h3').text
+                    # print(name)
                     target_url = course.find_element(By.XPATH, './div[2]/h3/a').get_attribute('href')
                     # 检查是否是待刷课程
                     for target in remaining_courses:
@@ -86,7 +117,7 @@ def visit_target_page(browser,zhanghao1,mima1,course_name_list):
                             goto_home_work(browser, target)
                             remaining_courses.remove(target)
                             time.sleep(1)
-                            print("切换到任务界面等待结束1")
+                            print("切换到任务界面等待结束")
                             browser.back()
                             while True:
                                 if browser.title != "个人空间":
@@ -100,7 +131,9 @@ def visit_target_page(browser,zhanghao1,mima1,course_name_list):
                             break
                 except Exception:
                     continue
-        print("所有课程已全部处理完成,goodbye")
+            else:
+                pass
+        print("所有已有的课程已全部处理完成,如果有期望课程未完成，请检查课程名")
     except Exception as e:
         print(f"找目标页面过程失败：{e}")
 
@@ -115,9 +148,7 @@ def goto_home_work(driver,course_name):# 学习通具体作业解密没有嵌套
         if choice.get_attribute('dataname') == "zy":
             choice.click()
             break
-    # WebDriverWait(driver,6).until(
-    #     EC.presence_of_element_located((By.XPATH,'/html/body/div[1]/div[3]/div[1]/div[1]/ul/li[5]/a'))# 点击作业选项
-    # ).click()
+
     time.sleep(1)
     main_window = driver.current_window_handle
     while True:
@@ -126,14 +157,21 @@ def goto_home_work(driver,course_name):# 学习通具体作业解密没有嵌套
             EC.presence_of_element_located((By.XPATH, '//*[@id="frame_content-zy"]'))  # 进入iframe
         )
         driver.switch_to.frame(frame_content)
+        print("已进入作业列表的iframe窗口")
+        # 先判断作业列表是不是空的
+        homework_list_is_empty_flag = WebDriverWait(driver, 3).until(EC.presence_of_element_located((
+            By.XPATH, '/html/body/div[2]/div/div/div[2]/div[2]')))
+        if "暂无作业" in homework_list_is_empty_flag.text:
+            print(f"{course_name}课程没有作业")
+            break
+
         homework_list = WebDriverWait(driver, 3).until(
             EC.presence_of_all_elements_located((By.XPATH, '/html/body/div[2]/div/div/div[2]/div[2]/ul/li'))
         )
         processed = False
+        print(f"{course_name}课程作业数:{len(homework_list)}")
         # 如果作业为空
-        if not homework_list:
-            print(f"{course_name}课程没有作业")
-            break
+        time.sleep(0.5)
         # 拿到全作业列表后，遍历拿到它们的名字和完成状况，并排除实验作业
         for homework in homework_list:
             try:
