@@ -106,9 +106,19 @@ def visit_target_page(browser,zhanghao1,mima1,course_name_list):
 
 
 def goto_home_work(driver,course_name):# 学习通具体作业解密没有嵌套
-    WebDriverWait(driver,6).until(
-        EC.presence_of_element_located((By.XPATH,'//*[@id="nav_18255"]/a'))# 点击作业选项
-    ).click()
+    # 先拿到选项列表
+    choice_list = WebDriverWait(driver,6).until(
+        EC.presence_of_all_elements_located((By.XPATH,"/html/body/div[1]/div[3]/div[1]/div/ul/li"))
+    )
+
+    for choice in choice_list:
+        if choice.get_attribute('dataname') == "zy":
+            choice.click()
+            break
+    # WebDriverWait(driver,6).until(
+    #     EC.presence_of_element_located((By.XPATH,'/html/body/div[1]/div[3]/div[1]/div[1]/ul/li[5]/a'))# 点击作业选项
+    # ).click()
+    time.sleep(1)
     main_window = driver.current_window_handle
     while True:
         # print("执行到这里1")
@@ -120,6 +130,10 @@ def goto_home_work(driver,course_name):# 学习通具体作业解密没有嵌套
             EC.presence_of_all_elements_located((By.XPATH, '/html/body/div[2]/div/div/div[2]/div[2]/ul/li'))
         )
         processed = False
+        # 如果作业为空
+        if not homework_list:
+            print(f"{course_name}课程没有作业")
+            break
         # 拿到全作业列表后，遍历拿到它们的名字和完成状况，并排除实验作业
         for homework in homework_list:
             try:
