@@ -32,7 +32,7 @@ class OpenDeepSeek:
         answer_list = []
         print("题库题数:",len(question_bank))
         # i = 0
-        qtip = "判断题只需要回答对错,填空题直接回答填什么,单选题和多选题只用回复正确选项,简答题请回答80字以内的答案"
+        qtip = "判断题只需要回答对错,填空题直接回答填什么,单选题和多选题只用回复正确选项,简答题请回答120字以内的答案"
         for question in question_bank:
             # i +=1
             q_text = ""
@@ -44,6 +44,7 @@ class OpenDeepSeek:
 
             answer = self.ask_deepseek(qtip+q_text)
             print("DeepSeek：",answer)
+            # 如果题是填空题，则先分割填空题的答案,不过在做作业脚本里修复
             answer_list.append(answer)
             # if i >=6:
             #     return answer_list
