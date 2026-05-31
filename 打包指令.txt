@@ -1,1 +1,0 @@
-pyinstaller -F -w --hidden-import=ai_deepseek 学习通获取题目.py
