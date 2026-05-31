@@ -341,7 +341,9 @@ def finish_homework(driver):
                 elif "填空题" in current_type:
                     # 对多填空时的答案进行处理
                     this_answer_content = answer_list.pop(0)
-                    if " " in this_answer_content:
+                    if "和" in this_answer_content:
+                        this_answer_content = this_answer_content.split("和")
+                    elif " " in this_answer_content:
                         this_answer_content = this_answer_content.split(" ")
                     elif "、" in this_answer_content:
                         this_answer_content = this_answer_content.split("、")
