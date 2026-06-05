@@ -17,7 +17,7 @@ class OpenDeepSeek:
             response = self.client.chat.completions.create(
                 model="deepseek-chat",
                 messages=[{"role": "user", "content": question}],
-                temperature=0.7,  # 随机性（0-2）
+                temperature=0.2,  # 随机性（0-2）
                 max_tokens=1000  # 最大回答长度
             )
             answer = response.choices[0].message.content
@@ -32,7 +32,7 @@ class OpenDeepSeek:
         answer_list = []
         print("题库题数:",len(question_bank))
         # i = 0
-        qtip = "判断题只需要回答对错,填空题直接回答填什么,单选题和多选题只用回复正确选项,简答题请回答120字以内的答案"
+        qtip = "判断题只需要回答对错,填空题直接回答填什么,单选题和多选题只用回复正确选项,简答题请回答120字以内的答案。所有答案不要回答多余信息"
         for question in question_bank:
             # i +=1
             q_text = ""

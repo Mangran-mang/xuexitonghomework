@@ -184,7 +184,7 @@ def goto_home_work(driver,course_name):# 学习通具体作业解密没有嵌套
                 if "实验" in homework_name:
                     print("已跳过实验作业")
                     continue
-                if "未" in homework_status:
+                if "未交" in homework_status:
                     # 处理未完成作业
                     homework.click()
                     # 切换新窗口
@@ -352,8 +352,15 @@ def finish_homework(driver):
                         for vacancy in all_vacancy:
                             get_iframe = vacancy.find_element(By.XPATH,'./div[1]/div/div[1]/div/div[2]/iframe')
                             driver.switch_to.frame(get_iframe)
+                            # 找到填空题的输入框
                             answer_input = driver.find_element(By.XPATH, '/html/body/p')
-                            answer_input.send_keys(this_answer_content.pop(0))
+                            # 如果填空题是多项，则按顺序填入否则，我已经提前切分好了，可以按是否是字符串来判断
+                            # 是多空还是单空
+                            if type(this_answer_content) == str:
+                                answer_input.send_keys(this_answer_content)
+                            else:
+                                answer_input.send_keys(this_answer_content.pop(0))
+                            # 填入答案
                             driver.execute_script("arguments[0].dispatchEvent(new Event('input'));", answer_input)
                             driver.switch_to.default_content()
                             time.sleep(0.5)
