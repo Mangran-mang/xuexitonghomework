@@ -1,415 +1,513 @@
-from selenium import webdriver
-from selenium.webdriver.edge.options import Options
-
 import sys
 import os
-
 import time
+
+from selenium import webdriver
+from selenium.webdriver.edge.options import Options
+from selenium.webdriver.edge.service import Service
 from selenium.webdriver.support.wait import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.edge.service import Service
-from webdriver_manager.microsoft import EdgeChromiumDriverManager
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.common.by import By
+
 import ai_deepseek
 
-question_bank = []
-api = ''
+# ─────────────────────────────────────────────
+# 全局状态
+# ─────────────────────────────────────────────
+question_bank: list[dict] = []
+api: str = ""
 
-# 增加输出场景
-class PrintToFile:
-    def __init__(self, file_name):
+
+# ─────────────────────────────────────────────
+# 自定义异常（保留，供外部捕获用）
+# ─────────────────────────────────────────────
+class FileFindException(Exception):
+    """填空题查找异常"""
+    def __str__(self):
+        return "填空题查找过程出错"
+
+
+class FileFinishException(Exception):
+    """填空题完成异常"""
+    def __str__(self):
+        return "填空题完成过程出错"
+
+
+# ─────────────────────────────────────────────
+# 同时输出到终端和日志文件
+# ─────────────────────────────────────────────
+class TeeOutput:
+    def __init__(self, file_name: str):
         self.terminal = sys.stdout
         self.log = open(file_name, "w", encoding="utf-8")
 
-    def write(self, message):
-        if self.terminal is not None:
+    def write(self, message: str):
+        if self.terminal:
             self.terminal.write(message)
-        if self.log is not None:
+        if self.log:
             self.log.write(message)
 
     def flush(self):
-        pass
+        if self.log:
+            self.log.flush()
 
-sys.stdout = PrintToFile("输出日志.txt")
 
-def get_resource_path(relative_path):
-    # 直接读取exe所在的当前目录，不管是开发环境还是打包环境
-    if getattr(sys, 'frozen', False):
-        # 打包后：exe所在的目录
-        base_path = os.path.dirname(sys.executable)
-    else:
-        # 开发时：当前脚本所在的目录
-        base_path = os.path.dirname(os.path.abspath(__file__))
-    return os.path.join(base_path, relative_path)
-# 初始化驱动
-def init_browser():
-    edge_options = Options()
-    edge_options.add_experimental_option("excludeSwitches",["enable-automation"])# 隐藏自动化特征
-    edge_options.add_experimental_option("useAutomationExtension",False)# 隐藏自动化特征
-    edge_options.add_argument("--disable-blink-features=AutomationControlled")# 隐藏自动化特征
-    edge_options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36 Edg/145.0.0.0")
-    prefs = {
+sys.stdout = TeeOutput("输出日志.txt")
+
+
+# ─────────────────────────────────────────────
+# 工具函数
+# ─────────────────────────────────────────────
+def get_resource_path(relative_path: str) -> str:
+    """兼容开发环境和 PyInstaller 打包环境的路径解析。"""
+    base = (
+        os.path.dirname(sys.executable)
+        if getattr(sys, "frozen", False)
+        else os.path.dirname(os.path.abspath(__file__))
+    )
+    return os.path.join(base, relative_path)
+
+
+def wait(driver, xpath: str, timeout: float = 6):
+    """快捷等待单个元素出现。"""
+    return WebDriverWait(driver, timeout).until(
+        EC.presence_of_element_located((By.XPATH, xpath))
+    )
+
+
+def wait_all(driver, xpath: str, timeout: float = 6):
+    """快捷等待多个元素出现。"""
+    return WebDriverWait(driver, timeout).until(
+        EC.presence_of_all_elements_located((By.XPATH, xpath))
+    )
+
+
+# ─────────────────────────────────────────────
+# 浏览器初始化
+# ─────────────────────────────────────────────
+def init_browser() -> webdriver.Edge:
+    opts = Options()
+    opts.add_experimental_option("excludeSwitches", ["enable-automation"])
+    opts.add_experimental_option("useAutomationExtension", False)
+    opts.add_argument("--disable-blink-features=AutomationControlled")
+    opts.add_argument(
+        "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/145.0.0.0 Safari/537.36 Edg/145.0.0.0"
+    )
+    opts.add_experimental_option("prefs", {
         "credentials_enable_service": False,
-        "profile.password_manager_enabled": False
-    }
-    browser_path = get_resource_path("driver/msedgedriver.exe")
-    service = Service(executable_path=browser_path)
+        "profile.password_manager_enabled": False,
+    })
 
-    edge_options.add_experimental_option("prefs", prefs)
-    browser = webdriver.Edge(options=edge_options,service=service)
-    browser.execute_script("Object.defineProperty(navigator,'webdriver',{get:()=>undefined})")# 隐藏自动化特征
+    service = Service(executable_path=get_resource_path("driver/msedgedriver.exe"))
+    browser = webdriver.Edge(options=opts, service=service)
+    browser.execute_script(
+        "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})"
+    )
     browser.implicitly_wait(10)
     return browser
 
-def visit_target_page(browser,zhanghao1,mima1,course_name_list):
+
+# ─────────────────────────────────────────────
+# 读取账号信息
+# ─────────────────────────────────────────────
+def get_user_data() -> tuple[str, str, list[str]]:
+    with open("想不通账号信息.txt", "r", encoding="utf-8") as f:
+        lines = f.readlines()
+
+    zhanghao = lines[1].strip()[3:]
+    mima     = lines[2].strip()[3:]
+    courses  = lines[3].strip()[7:].split(",")
+    deepseek_api = lines[4].strip()[4:]
+
+    global api
+    api = deepseek_api
+    print(f"待刷课程：{courses}")
+    return zhanghao, mima, courses
+
+
+# ─────────────────────────────────────────────
+# 登录 + 遍历课程
+# ─────────────────────────────────────────────
+def visit_target_page(browser, zhanghao: str, mima: str, course_name_list: list[str]):
     try:
-        zhanghao = WebDriverWait(browser, 10).until(
-            EC.presence_of_element_located((By.XPATH, '//*[@id="phone"]'))
-        )
-        zhanghao.send_keys(zhanghao1)
-
-        mima = WebDriverWait(browser, 10).until(
-            EC.presence_of_element_located((By.XPATH, '//*[@id="pwd"]'))
-        )
-        mima.send_keys(mima1)
-
-        WebDriverWait(browser, 10).until(
-            EC.presence_of_element_located((By.XPATH, '//*[@id="loginBtn"]'))
-        ).click()
-
+        wait(browser, '//*[@id="phone"]').send_keys(zhanghao)
+        wait(browser, '//*[@id="pwd"]').send_keys(mima)
+        wait(browser, '//*[@id="loginBtn"]').click()
         time.sleep(1)
-        # 此时已进入个人空间
-        # 先获取所有课程名
+
         print("已进入个人主页")
-        course_iframe = WebDriverWait(browser,8).until(
-            EC.presence_of_element_located((By.XPATH,'//*[@id="frame_content"]'))
-        )
+        course_iframe = wait(browser, '//*[@id="frame_content"]', timeout=8)
         browser.switch_to.frame(course_iframe)
         time.sleep(1)
-        remaining_courses = course_name_list.copy()
-        # ==============检测是不是旧版学习通==========
+
+        # 检测旧版 / 新版切换按钮
         try:
-            new_or_old_button = WebDriverWait(browser, 0.5).until(
+            btn = WebDriverWait(browser, 0.5).until(
                 EC.presence_of_element_located((By.XPATH, '//*[@id="divbox"]/div/div/div[1]/a'))
             )
-            if "体验新版" in new_or_old_button.text:
-                new_or_old_button.click()
-                print("已成功选择新版")
+            if "体验新版" in btn.text:
+                btn.click()
+                print("已切换到新版")
                 time.sleep(1.5)
-        except Exception as e:
+        except Exception:
             pass
-        #======================================
-        while remaining_courses:
-            myStudy_course_list = browser.find_elements(By.XPATH, '//*[@id="stuNormalCourseListDiv"]/div')  # 直接获取所有具体课程
 
-            for course in myStudy_course_list: # 准备进入所填课程
-                # # 测试阻塞
-                # time.sleep(3600)
-                # # 测试阻塞
+        remaining = course_name_list.copy()
+        while remaining:
+            course_cards = browser.find_elements(
+                By.XPATH, '//*[@id="stuNormalCourseListDiv"]/div'
+            )
+            for card in course_cards:
                 try:
-                    name = course.find_element(By.XPATH, './div[2]/h3').text
-                    # print(name)
-                    target_url = course.find_element(By.XPATH, './div[2]/h3/a').get_attribute('href')
-                    # 检查是否是待刷课程
-                    for target in remaining_courses:
-                        if target in name:
-                            browser.get(target_url)
-                            print(f"已进入{name}课程页")
-                            time.sleep(1.5)
-                            goto_home_work(browser, target)
-                            remaining_courses.remove(target)
-                            time.sleep(1)
-                            print("切换到任务界面等待结束")
-                            browser.back()
-                            while True:
-                                if browser.title != "个人空间":
-                                    browser.back()
-                                    time.sleep(0.5)
-                                else:
-                                    break
-                            if remaining_courses:
-                                print("还有待刷课程{}".format(remaining_courses))
-                            browser.switch_to.frame(course_iframe)
-                            break
+                    name       = card.find_element(By.XPATH, "./div[2]/h3").text
+                    target_url = card.find_element(By.XPATH, "./div[2]/h3/a").get_attribute("href")
+
+                    matched = next((t for t in remaining if t in name), None)
+                    if not matched:
+                        continue
+
+                    browser.get(target_url)
+                    print(f"已进入《{name}》课程页")
+                    time.sleep(1.5)
+
+                    goto_home_work(browser, matched)
+                    remaining.remove(matched)
+                    time.sleep(1)
+
+                    # 返回个人空间
+                    browser.back()
+                    while browser.title != "个人空间":
+                        browser.back()
+                        time.sleep(0.5)
+
+                    if remaining:
+                        print(f"还有待刷课程：{remaining}")
+                    browser.switch_to.frame(course_iframe)
+                    break
                 except Exception:
                     continue
-            else:
-                pass
-        print("所有已有的课程已全部处理完成,如果有期望课程未完成，请检查课程名")
+
+        print("所有课程处理完成，如有遗漏请检查课程名。")
+
     except Exception as e:
         print(f"找目标页面过程失败：{e}")
 
 
-def goto_home_work(driver,course_name):# 学习通具体作业解密没有嵌套
-    # 先拿到选项列表
-    choice_list = WebDriverWait(driver,6).until(
-        EC.presence_of_all_elements_located((By.XPATH,"/html/body/div[1]/div[3]/div[1]/div/ul/li"))
-    )
-
-    for choice in choice_list:
-        if choice.get_attribute('dataname') == "zy":
-            choice.click()
+# ─────────────────────────────────────────────
+# 进入课程作业列表，循环处理未交作业
+# ─────────────────────────────────────────────
+def goto_home_work(driver, course_name: str):
+    # 点击"作业"选项卡
+    tabs = wait_all(driver, "/html/body/div[1]/div[3]/div[1]/div/ul/li")
+    for tab in tabs:
+        if tab.get_attribute("dataname") == "zy":
+            tab.click()
             break
-
     time.sleep(1)
-    main_window = driver.current_window_handle
+
     while True:
-        # print("执行到这里1")
-        frame_content = WebDriverWait(driver, 6).until(
-            EC.presence_of_element_located((By.XPATH, '//*[@id="frame_content-zy"]'))  # 进入iframe
+        frame = wait(driver, '//*[@id="frame_content-zy"]')
+        driver.switch_to.frame(frame)
+        print("已进入作业列表 iframe")
+
+        # 检测是否无作业
+        empty_div = WebDriverWait(driver, 3).until(
+            EC.presence_of_element_located((By.XPATH, '/html/body/div[2]/div/div/div[2]/div[2]'))
         )
-        driver.switch_to.frame(frame_content)
-        print("已进入作业列表的iframe窗口")
-        # 先判断作业列表是不是空的
-        homework_list_is_empty_flag = WebDriverWait(driver, 3).until(EC.presence_of_element_located((
-            By.XPATH, '/html/body/div[2]/div/div/div[2]/div[2]')))
-        if "暂无作业" in homework_list_is_empty_flag.text:
-            print(f"{course_name}课程没有作业")
+        if "暂无作业" in empty_div.text:
+            print(f"《{course_name}》没有作业")
             break
 
-        homework_list = WebDriverWait(driver, 3).until(
-            EC.presence_of_all_elements_located((By.XPATH, '/html/body/div[2]/div/div/div[2]/div[2]/ul/li'))
+        hw_list = WebDriverWait(driver, 3).until(
+            EC.presence_of_all_elements_located(
+                (By.XPATH, '/html/body/div[2]/div/div/div[2]/div[2]/ul/li')
+            )
         )
-        processed = False
-        print(f"{course_name}课程作业数:{len(homework_list)}")
-        # 如果作业为空
+        print(f"《{course_name}》作业数：{len(hw_list)}")
         time.sleep(0.5)
-        # 拿到全作业列表后，遍历拿到它们的名字和完成状况，并排除实验作业
-        for homework in homework_list:
-            try:
-                homework_name = homework.find_element(By.XPATH, './div[2]/p[1]').text
-                homework_status = homework.find_element(By.XPATH, './div[2]/p[2]').text
 
-                if "实验" in homework_name:
-                    print("已跳过实验作业")
+        processed = False
+        for hw in hw_list:
+            try:
+                hw_name   = hw.find_element(By.XPATH, "./div[2]/p[1]").text
+                hw_status = hw.find_element(By.XPATH, "./div[2]/p[2]").text
+
+                if "实验" in hw_name or "报告" in hw_name:
+                    print(f"跳过实验/报告作业：{hw_name}")
                     continue
-                if "未交" in homework_status:
-                    # 处理未完成作业
-                    homework.click()
-                    # 切换新窗口
-                    WebDriverWait(driver, 3).until(lambda d: len(driver.window_handles) > 1)
-                    driver.switch_to.window(driver.window_handles[-1])
-                    try:
-                        get_homework(driver)
-                        time.sleep(0.5)
-                        driver.refresh()
-                        time.sleep(0.5)
-                    except Exception as e:
-                        print(f"处理作业出现问题：{e}")
-                    # driver.close()
-                    # driver.switch_to.window(main_window)
-                    time.sleep(1)
-                    processed = True
-                    break
+
+                if "未交" not in hw_status:
+                    continue
+
+                hw.click()
+                WebDriverWait(driver, 3).until(lambda d: len(d.window_handles) > 1)
+                driver.switch_to.window(driver.window_handles[-1])
+
+                try:
+                    get_homework(driver)
+                    time.sleep(0.5)
+                    driver.refresh()
+                    time.sleep(0.5)
+                except Exception as e:
+                    print(f"处理作业出现问题：{e}")
+
+                time.sleep(1)
+                processed = True
+                break
             except Exception:
                 continue
-            # 没有未完成作业了，退出循环
+
         if not processed:
             break
-    print("已处理完毕《{}》的所有作业".format(course_name))
+
+    print(f"《{course_name}》所有作业处理完毕")
     driver.switch_to.default_content()
     driver.back()
     driver.back()
 
 
+# ─────────────────────────────────────────────
+# 收集题目
+# ─────────────────────────────────────────────
+TITLE_TYPES = ["判断题", "单选题", "多选题", "填空题", "简答题"]
+
+
 def get_homework(driver):
-    all_titles = driver.find_elements(By.XPATH,'//*[@id="submitForm"]/div')# 储存所有题型
-    title_type_list = ["判断题","单选题","多选题","填空题","简答题"]
-    homework = []
-    for i in all_titles:# i是某个题型的所有题
-        title_type = i.find_element(By.XPATH,'./h2')
-        print("正在处理的题型是{}".format(title_type.text))
-        if title_type_list[0] in title_type.text:# 判断题
-            for i_child in i.find_elements(By.XPATH,'./div'):# 找到所有具体题目外部标签
-                try:
-                    full_text = i_child.find_element(By.XPATH,'./h3').text.replace("\n", "")
-                    homework.append({
-                        "title":full_text,
-                        "options":None})
-                except Exception:
-                    pass
-        elif title_type_list[1] in title_type.text:# 单选题
-            for i_child in i.find_elements(By.XPATH,'./div'):# 这里遍历的是单个类型的所有题目
-                try:
-                    title_content = i_child.find_element(By.XPATH,'./h3').text.replace("\n", "")
-                    title_options = i_child.find_element(By.XPATH,'./div[2]').text.replace("\n", ":")
-                    homework.append({
-                        "title": title_content,
-                        "options": title_options})
-                except Exception:
-                    pass
-        elif title_type_list[2] in title_type.text:# 多选题
-            for i_child in i.find_elements(By.XPATH,'./div'):
-                try:
-                    title_content = i_child.find_element(By.XPATH,'./h3').text.replace("\n", "")
-                    title_options = i_child.find_element(By.XPATH,'./div[2]').text.replace("\n", ":")
-                    homework.append({
-                        "title": title_content,
-                        "options": title_options})
-                except Exception:
-                    pass
-        elif title_type_list[3] in title_type.text:# 填空题
-            for i_child in i.find_elements(By.XPATH,'./div'):
-                try:
-                    title_content = i_child.find_element(By.XPATH,'./h3').text.replace("\n", "")
-                    homework.append({
-                        "title": title_content,
-                        "options": None})
-                except Exception:
-                    pass
-        else:
-            for i_child in i.find_elements(By.XPATH, './div'):# 简答题
-                try:
-                    title_content = i_child.find_element(By.XPATH,'./h3').text.replace("\n", "")
-                    homework.append({
-                        "title": title_content,
-                        "options": None})
-                except Exception:
-                    pass
-    if homework:
-        global question_bank
-        print(homework)
-        question_bank = homework
-        finish_homework(driver)# 完成刷作业逻辑
-        driver.close()
-        tabs = driver.window_handles
-        if tabs:
-            driver.switch_to.window(tabs[0])
-            # 这里回到作业列表界面
-        else:
-            print("没有其他窗口,发生严重错误")
-        # 跳转逻辑
-        # 巴拉巴拉
-    else:
+    """遍历页面上所有题型，把题目收集到 question_bank，再调用 finish_homework。"""
+    type_sections = driver.find_elements(By.XPATH, '//*[@id="submitForm"]/div')
+    homework: list[dict] = []
+
+    for section in type_sections:
+        section_type = section.find_element(By.XPATH, "./h2").text
+        print(f"收集题型：{section_type}")
+
+        has_options = any(t in section_type for t in ["单选题", "多选题"])
+
+        for item in section.find_elements(By.XPATH, "./div"):
+            try:
+                title = item.find_element(By.XPATH, "./h3").text.replace("\n", "")
+                if has_options:
+                    options = item.find_element(By.XPATH, "./div[2]").text.replace("\n", ":")
+                    homework.append({"title": title, "options": options})
+                else:
+                    homework.append({"title": title, "options": None})
+            except Exception:
+                pass
+
+    if not homework:
         print("未找到题目")
+        return
 
-def get_user_data():
-    with open("想不通账号信息.txt","r",encoding="utf-8") as f:
-        try:
-            all_data = f.readlines()
-            zhanghao1 = all_data[1].strip()[3:]
-            mima1 = all_data[2].strip()[3:]
-            course_list = all_data[3].strip()[7:].split(",")
-            DeepSeekApi = all_data[4].strip()[4:]
-            global api
-            api = DeepSeekApi
-            print("你要刷的课程为{}".format(course_list))
-        except Exception as e:
-            print(f"获取用户信息出现问题：{e}")
-    return zhanghao1,mima1,course_list
-
-def finish_homework(driver):
-    if api:
-        dep = ai_deepseek.OpenDeepSeek(api)
-        answer_list = dep.dialogue(question_bank)# ai返回的答案列表
-        clean_question_bank()
-        all_titletypes = driver.find_elements(By.XPATH,'//*[@id="submitForm"]/div')# 获取本页所有题型
-        for i in all_titletypes:# i是某一个题型
-            current_type = i.find_element(By.XPATH,'./h2').text# 获得题型
-            print("正在处理的题型是{}".format(current_type))
-            for index,current_title in enumerate(i.find_elements(By.XPATH,'./div')):# current_title是某个题,i.find_e找到了所有题
-                # 开始具体题目的处理
-                if "单选题" in current_type:
-                    try:
-                        for option in current_title.find_elements(By.XPATH,'./div[2]/div'):# 遍历具体题目的每一个选项
-                            if answer_list[0] == option.text[0]:
-                                ActionChains(driver).move_to_element(option).click().perform()
-                                answer_list.pop(0)
-                                time.sleep(0.5)
-                                break
-                    except Exception as e:
-                        print("查找单选题过程中出错")
-                        driver.switch_to.default_content()
-                elif "多选题" in current_type:
-                    try:
-                        num =0
-                        option_num = len(current_title.find_elements(By.XPATH, './div[2]/div'))# 获取选项数量
-                        for option in current_title.find_elements(By.XPATH, './div[2]/div'):  # 遍历具体题目的每一个选项
-                            num +=1
-                            if  option.text[0] in answer_list[0]:
-                                ActionChains(driver).move_to_element(option).click().perform()
-                                time.sleep(0.5)
-
-                            # 判断是否过了所有选项，确认后移除答案，并结束本次循环
-                            if num >=option_num:
-                                answer_list.pop(0)
-                                break
-                    except Exception as e:
-                        print(f"多选题出错")
-                        raise e
-                elif "填空题" in current_type:
-                    # 对多填空时的答案进行处理
-                    this_answer_content = answer_list.pop(0)
-                    if "和" in this_answer_content:
-                        this_answer_content = this_answer_content.split("和")
-                    elif " " in this_answer_content:
-                        this_answer_content = this_answer_content.split(" ")
-                    elif "、" in this_answer_content:
-                        this_answer_content = this_answer_content.split("、")
-                    try:
-                        all_vacancy = current_title.find_elements(By.XPATH,'./div[2]/div')# 拿到填空题中所有空
-                        for vacancy in all_vacancy:
-                            get_iframe = vacancy.find_element(By.XPATH,'./div[1]/div/div[1]/div/div[2]/iframe')
-                            driver.switch_to.frame(get_iframe)
-                            # 找到填空题的输入框
-                            answer_input = driver.find_element(By.XPATH, '/html/body/p')
-                            # 如果填空题是多项，则按顺序填入否则，我已经提前切分好了，可以按是否是字符串来判断
-                            # 是多空还是单空
-                            if type(this_answer_content) == str:
-                                answer_input.send_keys(this_answer_content)
-                            else:
-                                answer_input.send_keys(this_answer_content.pop(0))
-                            # 填入答案
-                            driver.execute_script("arguments[0].dispatchEvent(new Event('input'));", answer_input)
-                            driver.switch_to.default_content()
-                            time.sleep(0.5)
-                    except Exception as e:
-                        print(f"填空题写入失败：{e}")
-                        driver.switch_to.default_content()
-                elif "判断题" in current_type:
-                    for option in current_title.find_elements(By.XPATH, './div[2]/div'):
-                        if answer_list[0] in option.text:
-                            ActionChains(driver).move_to_element(option).click().perform()
-                            answer_list.pop(0)
-                            time.sleep(0.5)
-                            break
-                elif "简答题" in current_type:
-                    try:
-                        # 检测有没有图片，有的话直接跳过
-                        img_tags = current_title.find_elements(By.TAG_NAME,'img')
-                        if img_tags:
-                            print("有图片，跳过")
-                            continue
-
-                        title_iframe = current_title.find_element(By.XPATH,'//*[@id="ueditor_0"]')# 找到简答题里的iframe
-                        driver.switch_to.frame(title_iframe)
-                        answer_input = driver.find_element(By.XPATH, '/html/body/p')
-                        answer_input.send_keys(answer_list[0])
-                        driver.execute_script("arguments[0].dispatchEvent(new Event('input'));", answer_input)
-                        answer_list.pop(0)
-                        driver.switch_to.default_content()
-                        time.sleep(0.5)
-                    except Exception as e:
-                        print(f"简答题写入出错：{e}")
-        up_button = driver.find_element(By.XPATH,'//*[@id="submitFocus"]/a[2]')# 找到提交按钮
-        up_button.click()
-        time.sleep(1)
-        driver.find_element(By.XPATH,'//*[@id="popok"]').click()
-        time.sleep(1)
-    else:
-        raise Exception("未找到DeepSeek的API")
-    # 自动化写作业逻辑
-    # 我说很简单
-def clean_question_bank():
     global question_bank
-    question_bank = []
+    question_bank = homework
+    print(f"共收集到 {len(homework)} 道题")
 
+    finish_homework(driver)
+
+    driver.close()
+    tabs = driver.window_handles
+    if tabs:
+        driver.switch_to.window(tabs[0])
+    else:
+        print("没有其他窗口，发生严重错误")
+
+
+# ─────────────────────────────────────────────
+# 填写答案
+# ─────────────────────────────────────────────
+def finish_homework(driver):
+    if not api:
+        raise Exception("未找到 DeepSeek 的 API Key")
+
+    dep = ai_deepseek.OpenDeepSeek(api)
+    answer_list: list[str] = dep.dialogue(question_bank)
+    question_bank.clear()
+
+    type_sections = driver.find_elements(By.XPATH, '//*[@id="submitForm"]/div')
+
+    for section in type_sections:
+        section_type = section.find_element(By.XPATH, "./h2").text
+        print(f"填写题型：{section_type}")
+        items = section.find_elements(By.XPATH, "./div")
+
+        for item in items:
+            # 只处理有 h3 的真正题目 div，跳过分数标注等多余 div，
+            # 与 get_homework 的过滤逻辑保持一致
+            try:
+                item.find_element(By.XPATH, "./h3")
+            except Exception:
+                continue
+
+            if not answer_list:
+                print("警告：答案列表已耗尽，跳过剩余题目")
+                break
+
+            if "单选题" in section_type:
+                _fill_single_choice(driver, item, answer_list)
+            elif "多选题" in section_type:
+                _fill_multi_choice(driver, item, answer_list)
+            elif "填空题" in section_type:
+                _fill_blank(driver, item, answer_list)
+            elif "判断题" in section_type:
+                _fill_judge(driver, item, answer_list)
+            elif "简答题" in section_type:
+                _fill_essay(driver, item, answer_list)
+
+    # 提交
+    submit_btn = driver.find_element(By.XPATH, '//*[@id="submitFocus"]/a[2]')
+    submit_btn.click()
+    time.sleep(1)
+    driver.find_element(By.XPATH, '//*[@id="popok"]').click()
+    time.sleep(1)
+
+
+# ─────────────────────────────────────────────
+# 各题型填写函数
+# ─────────────────────────────────────────────
+def _fill_single_choice(driver, item, answer_list: list):
+    answer = answer_list[0]
+    try:
+        for option in item.find_elements(By.XPATH, "./div[2]/div"):
+            if option.text and option.text[0] == answer:
+                ActionChains(driver).move_to_element(option).click().perform()
+                answer_list.pop(0)
+                time.sleep(0.5)
+                return
+        # 未匹配到选项也消费掉答案，防止错位
+        print(f"单选题未匹配到答案「{answer}」，已跳过")
+        answer_list.pop(0)
+    except Exception as e:
+        print(f"单选题出错：{e}")
+        answer_list.pop(0)
+
+
+def _fill_multi_choice(driver, item, answer_list: list):
+    answer = answer_list[0]
+    try:
+        options = item.find_elements(By.XPATH, "./div[2]/div")
+        for option in options:
+            if option.text and option.text[0] in answer:
+                ActionChains(driver).move_to_element(option).click().perform()
+                time.sleep(0.5)
+        answer_list.pop(0)
+    except Exception as e:
+        print(f"多选题出错：{e}")
+        answer_list.pop(0)
+
+
+def _fill_blank(driver, item, answer_list: list):
+    """填空题：支持单空和多空。"""
+    raw_answer = answer_list.pop(0)
+
+    # 拆分多空答案（常见分隔符）
+    separators = ("和", "、", "·", "，", ",", " ")
+    for sep in separators:
+        if sep in raw_answer:
+            parts = [p.strip() for p in raw_answer.split(sep) if p.strip()]
+            if len(parts) > 1:
+                break
+    else:
+        parts = [raw_answer]
+
+    print(f"  填空答案：{raw_answer} → {parts}")
+
+    try:
+        vacancies = item.find_elements(By.XPATH, "./div[2]/div")
+        print(f"  找到空位数：{len(vacancies)}")
+
+        if not vacancies:
+            print("  ⚠ 未找到填空输入框，跳过")
+            return
+
+        for i, vacancy in enumerate(vacancies):
+            fill_text = parts[i] if i < len(parts) else parts[-1]
+            print(f"  第{i+1}空填入：{fill_text}")
+            try:
+                iframe = vacancy.find_element(By.XPATH, ".//iframe")
+                driver.switch_to.frame(iframe)
+
+                # 填空题的富文本编辑器：尝试多种定位方式
+                # 先尝试 p 标签（最常见），不行就操作 body 本身
+                try:
+                    inp = driver.find_element(By.XPATH, "/html/body/p")
+                except Exception:
+                    inp = driver.find_element(By.XPATH, "/html/body")
+
+                # 先点击激活编辑器，再清空并键入
+                inp.click()
+                time.sleep(0.2)
+                inp.clear()
+                inp.send_keys(fill_text)
+                # 触发 input 事件让编辑器感知内容变化
+                driver.execute_script(
+                    "arguments[0].dispatchEvent(new Event('input', {bubbles: true}));", inp
+                )
+                time.sleep(0.5)
+            except Exception as e:
+                print(f"  填空第 {i+1} 空出错：{e}")
+            finally:
+                driver.switch_to.default_content()
+    except Exception as e:
+        print(f"填空题整体出错：{e}")
+        driver.switch_to.default_content()
+
+
+def _fill_judge(driver, item, answer_list: list):
+    answer = answer_list[0]
+    try:
+        for option in item.find_elements(By.XPATH, "./div[2]/div"):
+            if answer in option.text:
+                ActionChains(driver).move_to_element(option).click().perform()
+                answer_list.pop(0)
+                time.sleep(0.5)
+                return
+        print(f"判断题未匹配到答案「{answer}」，已跳过")
+        answer_list.pop(0)
+    except Exception as e:
+        print(f"判断题出错：{e}")
+        answer_list.pop(0)
+
+
+def _fill_essay(driver, item, answer_list: list):
+    answer = answer_list[0]
+    try:
+        # 检测有图片则跳过
+        if item.find_elements(By.TAG_NAME, "img"):
+            print("简答题含图片，跳过")
+            answer_list.pop(0)
+            return
+
+        # 使用相对 XPath，避免跨题定位错误
+        essay_iframe = item.find_element(By.XPATH, './/*[contains(@id,"ueditor")]')
+        driver.switch_to.frame(essay_iframe)
+        inp = driver.find_element(By.XPATH, "/html/body/p")
+        inp.send_keys(answer)
+        driver.execute_script(
+            "arguments[0].dispatchEvent(new Event('input'));", inp
+        )
+        answer_list.pop(0)
+        time.sleep(0.5)
+    except Exception as e:
+        print(f"简答题出错：{e}")
+        answer_list.pop(0)
+    finally:
+        driver.switch_to.default_content()
+
+
+# ─────────────────────────────────────────────
+# 入口
+# ─────────────────────────────────────────────
 if __name__ == "__main__":
     browser = init_browser()
     try:
-        browser.get("https://passport2.chaoxing.com/login?fid=12&refer=http%3A%2F%2Fi.chaoxing.com%2Fbase%3Ft%3D1771763723377&space=2")
-        visit_target_page(browser,*get_user_data())
+        browser.get(
+            "https://passport2.chaoxing.com/login"
+            "?fid=12&refer=http%3A%2F%2Fi.chaoxing.com%2Fbase%3Ft%3D1771763723377&space=2"
+        )
+        visit_target_page(browser, *get_user_data())
         time.sleep(3)
     finally:
         browser.quit()
