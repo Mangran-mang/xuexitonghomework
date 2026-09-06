@@ -1,6 +1,9 @@
 import sys
 import os
+import re
 import time
+import subprocess
+import zipfile
 
 from selenium import webdriver
 from selenium.webdriver.edge.options import Options
@@ -53,6 +56,13 @@ class TeeOutput:
             self.log.flush()
 
 
+# 打包成 exe 后直接双击/控制台运行时，stdout 可能是 GBK 编码，
+# 打印 emoji 会直接崩；强制重配为 UTF-8（对窗口模式等异常流做容错）
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 sys.stdout = TeeOutput("输出日志.txt")
 
 
@@ -84,8 +94,115 @@ def wait_all(driver, xpath: str, timeout: float = 6):
 
 
 # ─────────────────────────────────────────────
-# 浏览器初始化
+# Edge 驱动自动匹配（Edge 自动更新后无需手动换 exe）
 # ─────────────────────────────────────────────
+def get_local_edge_version() -> str:
+    """读本机 Edge 浏览器版本号（注册表优先，安装目录名兜底）。"""
+    try:
+        import winreg
+
+        for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+            try:
+                with winreg.OpenKey(hive, r"Software\Microsoft\Edge\BLBeacon") as key:
+                    return winreg.QueryValueEx(key, "version")[0]
+            except OSError:
+                continue
+    except Exception:
+        pass
+    # Edge 的安装目录本身就是按版本号命名的：Application/<版本>/msedge.exe
+    for base in (
+        r"C:\Program Files (x86)\Microsoft\Edge\Application",
+        r"C:\Program Files\Microsoft\Edge\Application",
+    ):
+        if os.path.isdir(base):
+            versions = [
+                d for d in os.listdir(base) if re.fullmatch(r"\d+(\.\d+){3}", d)
+            ]
+            if versions:
+                return max(versions, key=lambda v: tuple(map(int, v.split("."))))
+    raise OSError("读不到本机 Edge 版本号")
+
+
+def get_driver_file_version(path: str) -> str:
+    """读本地 msedgedriver.exe 的版本号，读不到返回空串。"""
+    try:
+        out = subprocess.run(
+            [path, "--version"], capture_output=True, text=True, timeout=30
+        )
+        m = re.search(r"\d+(\.\d+){3}", (out.stdout or "") + (out.stderr or ""))
+        return m.group(0) if m else ""
+    except Exception:
+        return ""
+
+
+def download_driver(edge_version: str, target: str) -> bool:
+    """下载指定版本的 msedgedriver 解压到 target；官方源失败再用国内镜像。"""
+    try:
+        import requests
+    except ImportError:
+        print("⚠️ 未安装 requests，无法自动下载驱动")
+        return False
+    urls = [
+        f"https://msedgedriver.microsoft.com/{edge_version}/edgedriver_win64.zip",
+        f"https://registry.npmmirror.com/-/binary/edgedriver/{edge_version}/edgedriver_win64.zip",
+    ]
+    zip_path = target + ".zip"
+    for url in urls:
+        try:
+            print(f"⬇ 正在下载 msedgedriver {edge_version}：{url}")
+            with requests.get(url, stream=True, timeout=60) as resp:
+                resp.raise_for_status()
+                total = int(resp.headers.get("Content-Length") or 0)
+                done = 0
+                with open(zip_path, "wb") as f:
+                    for chunk in resp.iter_content(256 * 1024):
+                        f.write(chunk)
+                        done += len(chunk)
+                        if total:
+                            print(f"\r   下载进度 {done * 100 // total}%", end="", flush=True)
+            print()
+            with zipfile.ZipFile(zip_path) as z:
+                name = next(n for n in z.namelist() if n.endswith("msedgedriver.exe"))
+                z.extract(name, os.path.dirname(target))
+                extracted = os.path.join(os.path.dirname(target), name)
+            if os.path.abspath(extracted) != os.path.abspath(target):
+                os.replace(extracted, target)
+            print(f"✅ 驱动已更新：{target}")
+            return True
+        except Exception as e:
+            print(f"\n⚠️ 下载失败：{str(e)[:100]}")
+        finally:
+            if os.path.exists(zip_path):
+                os.remove(zip_path)
+    return False
+
+
+def resolve_driver_path() -> str:
+    """本地 driver/msedgedriver.exe 版本与 Edge 匹配就直接用，不匹配就自动下载新版。"""
+    local = get_resource_path("driver/msedgedriver.exe")
+    try:
+        edge_version = get_local_edge_version()
+    except OSError as e:
+        print(f"⚠️ {e}，直接使用本地驱动")
+        if os.path.exists(local):
+            return local
+        raise FileNotFoundError(f"未找到 {local}")
+
+    if os.path.exists(local):
+        driver_version = get_driver_file_version(local)
+        if driver_version.split(".")[0] == edge_version.split(".")[0]:
+            print(f"✅ 本地驱动({driver_version}) 与 Edge({edge_version}) 版本匹配")
+            return local
+        print(f"⚠️ 本地驱动({driver_version or '版本未知'}) 与 Edge({edge_version}) 不匹配，尝试自动更新")
+
+    if download_driver(edge_version, local):
+        return local
+    if os.path.exists(local):
+        print("⚠️ 自动下载失败，继续使用本地驱动（注意版本可能不匹配）")
+        return local
+    raise FileNotFoundError(f"未找到 {local}，且自动下载失败")
+
+
 def init_browser() -> webdriver.Edge:
     opts = Options()
     opts.add_experimental_option("excludeSwitches", ["enable-automation"])
@@ -101,7 +218,7 @@ def init_browser() -> webdriver.Edge:
         "profile.password_manager_enabled": False,
     })
 
-    service = Service(executable_path=get_resource_path("driver/msedgedriver.exe"))
+    service = Service(executable_path=resolve_driver_path())
     browser = webdriver.Edge(options=opts, service=service)
     browser.execute_script(
         "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})"
@@ -114,7 +231,7 @@ def init_browser() -> webdriver.Edge:
 # 读取账号信息
 # ─────────────────────────────────────────────
 def get_user_data() -> tuple[str, str, list[str]]:
-    with open("想不通账号信息.txt", "r", encoding="utf-8") as f:
+    with open(get_resource_path("想不通账号信息.txt"), "r", encoding="utf-8") as f:
         lines = f.readlines()
 
     zhanghao = lines[1].strip()[3:]
@@ -156,10 +273,25 @@ def visit_target_page(browser, zhanghao: str, mima: str, course_name_list: list[
             pass
 
         remaining = course_name_list.copy()
+        stuck = 0
         while remaining:
             course_cards = browser.find_elements(
                 By.XPATH, '//*[@id="stuNormalCourseListDiv"]/div'
             )
+            if not course_cards:
+                # 不在个人空间页（比如上一门课出错后停留位置不对）：回个人空间重试
+                stuck += 1
+                print(f"个人空间课程列表未加载（第{stuck}次）")
+                if stuck >= 3:
+                    print("❌ 找不到课程列表，退出。请检查登录状态或课程名是否正确。")
+                    return
+                browser.switch_to.default_content()
+                browser.get("https://i.chaoxing.com/base")
+                time.sleep(2)
+                course_iframe = wait(browser, '//*[@id="frame_content"]', timeout=8)
+                browser.switch_to.frame(course_iframe)
+                continue
+            stuck = 0
             for card in course_cards:
                 try:
                     name       = card.find_element(By.XPATH, "./div[2]/h3").text
@@ -173,18 +305,20 @@ def visit_target_page(browser, zhanghao: str, mima: str, course_name_list: list[
                     print(f"已进入《{name}》课程页")
                     time.sleep(1.5)
 
-                    goto_home_work(browser, matched)
-                    remaining.remove(matched)
-                    time.sleep(1)
-
-                    # 返回个人空间
-                    browser.back()
-                    while browser.title != "个人空间":
-                        browser.back()
-                        time.sleep(0.5)
+                    try:
+                        goto_home_work(browser, matched)
+                    except Exception as e:
+                        print(f"《{name}》处理出错（跳过该课程）：{e}")
+                    finally:
+                        remaining.remove(matched)
+                        # 无论成败都直接回个人空间，下一门课要在这里找课程卡片
+                        browser.switch_to.default_content()
+                        browser.get("https://i.chaoxing.com/base")
+                        time.sleep(1.5)
 
                     if remaining:
                         print(f"还有待刷课程：{remaining}")
+                    course_iframe = wait(browser, '//*[@id="frame_content"]', timeout=8)
                     browser.switch_to.frame(course_iframe)
                     break
                 except Exception:
@@ -200,32 +334,49 @@ def visit_target_page(browser, zhanghao: str, mima: str, course_name_list: list[
 # 进入课程作业列表，循环处理未交作业
 # ─────────────────────────────────────────────
 def goto_home_work(driver, course_name: str):
-    # 点击"作业"选项卡
-    tabs = wait_all(driver, "/html/body/div[1]/div[3]/div[1]/div/ul/li")
-    for tab in tabs:
-        if tab.get_attribute("dataname") == "zy":
-            tab.click()
-            break
-    time.sleep(1)
+    """循环处理课程里所有未交作业。
+    每轮都重新点"作业"选项卡再进列表：处理完一个作业回来页面会被刷新，
+    选项卡状态会重置，只在循环外点一次会导致第二轮找不到 iframe 而中断。"""
+    main_window = driver.current_window_handle
+    tried_names = set()  # 处理过的作业名，防止提交后状态没变化导致死循环
+    done_count = 0
 
     while True:
-        frame = wait(driver, '//*[@id="frame_content-zy"]')
-        driver.switch_to.frame(frame)
-        print("已进入作业列表 iframe")
+        # 回到课程页顶层，重新点"作业"选项卡
+        try:
+            driver.switch_to.default_content()
+            tabs = wait_all(driver, "/html/body/div[1]/div[3]/div[1]/div/ul/li")
+            for tab in tabs:
+                if tab.get_attribute("dataname") == "zy":
+                    tab.click()
+                    break
+            time.sleep(1)
 
-        # 检测是否无作业
-        empty_div = WebDriverWait(driver, 3).until(
-            EC.presence_of_element_located((By.XPATH, '/html/body/div[2]/div/div/div[2]/div[2]'))
-        )
-        if "暂无作业" in empty_div.text:
-            print(f"《{course_name}》没有作业")
+            frame = wait(driver, '//*[@id="frame_content-zy"]')
+            driver.switch_to.frame(frame)
+            print("已进入作业列表 iframe")
+        except Exception as e:
+            print(f"《{course_name}》重新进入作业列表失败：{e}")
             break
 
-        hw_list = WebDriverWait(driver, 3).until(
-            EC.presence_of_all_elements_located(
-                (By.XPATH, '/html/body/div[2]/div/div/div[2]/div[2]/ul/li')
+        # 检测是否无作业 / 读取作业列表
+        try:
+            empty_div = WebDriverWait(driver, 3).until(
+                EC.presence_of_element_located((By.XPATH, '/html/body/div[2]/div/div/div[2]/div[2]'))
             )
-        )
+            if "暂无作业" in empty_div.text:
+                print(f"《{course_name}》没有作业")
+                break
+
+            hw_list = WebDriverWait(driver, 3).until(
+                EC.presence_of_all_elements_located(
+                    (By.XPATH, '/html/body/div[2]/div/div/div[2]/div[2]/ul/li')
+                )
+            )
+        except Exception as e:
+            print(f"《{course_name}》读取作业列表失败：{e}")
+            break
+
         print(f"《{course_name}》作业数：{len(hw_list)}")
         time.sleep(0.5)
 
@@ -241,19 +392,40 @@ def goto_home_work(driver, course_name: str):
 
                 if "未交" not in hw_status:
                     continue
+                if hw_name in tried_names:
+                    continue
+                tried_names.add(hw_name)
 
+                print(f"开始处理作业：{hw_name}（{hw_status}）")
                 hw.click()
                 WebDriverWait(driver, 3).until(lambda d: len(d.window_handles) > 1)
                 driver.switch_to.window(driver.window_handles[-1])
 
                 try:
                     get_homework(driver)
-                    time.sleep(0.5)
-                    driver.refresh()
-                    time.sleep(0.5)
+                    done_count += 1
                 except Exception as e:
                     print(f"处理作业出现问题：{e}")
 
+                # 无论成败都把作业标签页关干净，回到课程页主窗口
+                try:
+                    for handle in driver.window_handles:
+                        if handle != main_window:
+                            driver.switch_to.window(handle)
+                            driver.close()
+                    driver.switch_to.window(main_window)
+                except Exception as e:
+                    print(f"清理作业窗口出错：{e}")
+                    try:
+                        driver.switch_to.window(main_window)
+                    except Exception:
+                        pass
+
+                try:
+                    driver.refresh()  # 刷新课程页，让作业状态更新
+                    time.sleep(0.5)
+                except Exception:
+                    pass
                 time.sleep(1)
                 processed = True
                 break
@@ -263,10 +435,7 @@ def goto_home_work(driver, course_name: str):
         if not processed:
             break
 
-    print(f"《{course_name}》所有作业处理完毕")
-    driver.switch_to.default_content()
-    driver.back()
-    driver.back()
+    print(f"《{course_name}》处理完毕，本次完成 {done_count} 个作业")
 
 
 # ─────────────────────────────────────────────
@@ -367,6 +536,20 @@ def finish_homework(driver):
 # ─────────────────────────────────────────────
 # 各题型填写函数
 # ─────────────────────────────────────────────
+def _read_editor_text(driver) -> str:
+    """读取当前 iframe 里编辑器的纯文本内容（用于写入校验）。"""
+    try:
+        return driver.execute_script(
+            "var b = document.body; return b ? (b.innerText || b.textContent || '') : '';"
+        )
+    except Exception:
+        return ""
+
+
+def _content_matches(expected: str, actual: str) -> bool:
+    """忽略所有空白字符后，检查期望内容是否真的写进了编辑器。"""
+    norm = lambda s: re.sub(r"\s+", "", s or "")
+    return bool(norm(expected)) and norm(expected) in norm(actual)
 def _fill_single_choice(driver, item, answer_list: list):
     answer = answer_list[0]
     try:
@@ -399,7 +582,7 @@ def _fill_multi_choice(driver, item, answer_list: list):
 
 
 def _fill_blank(driver, item, answer_list: list):
-    """填空题：支持单空和多空。"""
+    """填空题：支持单空和多空。每空填完都读回内容校验，失败用 JS 兜底重写。"""
     raw_answer = answer_list.pop(0)
 
     # 拆分多空答案（常见分隔符）
@@ -446,6 +629,25 @@ def _fill_blank(driver, item, answer_list: list):
                     "arguments[0].dispatchEvent(new Event('input', {bubbles: true}));", inp
                 )
                 time.sleep(0.5)
+
+                # 校验：读回内容确认真的写进去了
+                if not _content_matches(fill_text, _read_editor_text(driver)):
+                    print(f"  ⚠ 第{i+1}空键入后编辑器为空，改用 JS 直接写入…")
+                    driver.execute_script(
+                        "document.body.innerHTML = '<p>' + arguments[0].replace(/\\n/g, '<br>') + '</p>';",
+                        fill_text,
+                    )
+                    driver.execute_script(
+                        "document.body.dispatchEvent(new Event('input',{bubbles:true}));"
+                    )
+                    time.sleep(0.5)
+
+                if _content_matches(fill_text, _read_editor_text(driver)):
+                    print(f"  ✅ 第{i+1}空校验通过")
+                else:
+                    print(
+                        f"  ❌ 第{i+1}空写入校验失败，编辑器当前内容：{_read_editor_text(driver)[:30]!r}"
+                    )
             except Exception as e:
                 print(f"  填空第 {i+1} 空出错：{e}")
             finally:
@@ -472,27 +674,56 @@ def _fill_judge(driver, item, answer_list: list):
 
 
 def _fill_essay(driver, item, answer_list: list):
-    answer = answer_list[0]
+    """简答题：写入后读回编辑器内容校验，失败用 JS 兜底重写。"""
+    answer = answer_list.pop(0)
     try:
         # 检测有图片则跳过
         if item.find_elements(By.TAG_NAME, "img"):
             print("简答题含图片，跳过")
-            answer_list.pop(0)
             return
 
         # 使用相对 XPath，避免跨题定位错误
         essay_iframe = item.find_element(By.XPATH, './/*[contains(@id,"ueditor")]')
         driver.switch_to.frame(essay_iframe)
-        inp = driver.find_element(By.XPATH, "/html/body/p")
+
+        try:
+            inp = driver.find_element(By.XPATH, "/html/body/p")
+        except Exception:
+            inp = driver.find_element(By.XPATH, "/html/body")
+
+        # 先点击激活编辑器，再清空并键入
+        try:
+            inp.click()
+            time.sleep(0.2)
+            inp.clear()
+        except Exception:
+            pass
         inp.send_keys(answer)
         driver.execute_script(
-            "arguments[0].dispatchEvent(new Event('input'));", inp
+            "arguments[0].dispatchEvent(new Event('input',{bubbles:true}));", inp
         )
-        answer_list.pop(0)
         time.sleep(0.5)
+
+        # 校验：读回内容确认真的写进去了
+        if not _content_matches(answer, _read_editor_text(driver)):
+            print("  ⚠ 键入后编辑器为空，改用 JS 直接写入…")
+            driver.execute_script(
+                "document.body.innerHTML = '<p>' + arguments[0].replace(/\\n/g, '<br>') + '</p>';",
+                answer,
+            )
+            driver.execute_script(
+                "document.body.dispatchEvent(new Event('input',{bubbles:true}));"
+            )
+            time.sleep(0.5)
+
+        if _content_matches(answer, _read_editor_text(driver)):
+            print(f"  ✅ 简答题校验通过，编辑器内容：{_read_editor_text(driver)[:50]}")
+        else:
+            print(
+                f"  ❌ 简答题写入校验失败，编辑器当前内容：{_read_editor_text(driver)[:50]!r}"
+            )
     except Exception as e:
         print(f"简答题出错：{e}")
-        answer_list.pop(0)
     finally:
         driver.switch_to.default_content()
 

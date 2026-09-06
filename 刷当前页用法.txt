@@ -1,1 +1,4 @@
 打开win+R输入msedge --remote-debugging-port=9222 --user-data-dir="C:\EdgeTest"打开浏览器才能用程序链接
+
+（现在可以不敲命令：配置面板「刷当前考试」页签里点「启动考试模式 Edge」效果相同；
+ 答题是脚本答题但不会自动交卷，答完自己检查一遍再手动提交）

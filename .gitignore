@@ -1,0 +1,14 @@
+# 账号 / 密码 / API Key，绝对不要提交到仓库
+想不通账号信息.txt
+输出日志.txt
+考试页面结构_*.html
+
+# 打包产物与二进制（成品 zip 走 GitHub Releases，不进仓库）
+__pycache__/
+build/
+dist/
+成品包/
+driver/
+*.zip
+.idea/
+.workbuddy/

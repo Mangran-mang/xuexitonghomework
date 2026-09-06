@@ -1,0 +1,16 @@
+pyinstaller -F -w --hidden-import=ai_deepseek 想不通一键刷作业.py
+pyinstaller -F -w --collect-all customtkinter 想不通配置面板.py
+pyinstaller -F -w --hidden-import=ai_deepseek 想不通刷当前考试.py
+
+# 成品包组装（拷去别的电脑用）：
+#   新建 成品包 文件夹，放入 dist 里的三个 exe + driver 文件夹 + 使用说明.txt
+#   不要放 想不通账号信息.txt（里面有密码和 API Key），面板首次保存时会自动生成
+#   成品模式下配置面板会优先启动同目录的 想不通一键刷作业.exe / 想不通刷当前考试.exe，
+#   所以目标电脑不需要装 Python
+#   防止同学误点两个内部 exe，组装完把它们设为隐藏（面板调用不受影响）：
+#     attrib +h 想不通一键刷作业.exe
+#     attrib +h 想不通刷当前考试.exe
+
+# 驱动说明：两个刷的脚本启动时会自动检测本机 Edge 版本，
+# driver/msedgedriver.exe 版本对不上就自动从官方源下载新版覆盖（失败自动换 npmmirror 国内镜像），
+# 所以 Edge 自动更新后不用再手动换驱动；完全没网时会继续用本地旧驱动。
